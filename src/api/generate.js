@@ -136,12 +136,24 @@ ${text}
     const ai = await openai.responses.create({
       model: 'gpt-4.1-mini',
       input: [
-        { role: 'system', content: [{ type: 'text', text: systemPrompt }] },
-        { role: 'user', content: [{ type: 'text', text: userPrompt }] },
+    -   { role: 'system', content: [{ type: 'text', text: systemPrompt }] },
+    -   { role: 'user', content: [{ type: 'text', text: userPrompt }] },
+    +   { role: 'system', content: [{ type: 'input_text', text: systemPrompt }] },
+    +   { role: 'user', content: [{ type: 'input_text', text: userPrompt }] },
       ],
     });
 
-    const replyText = (ai && (ai.output_text || '').trim()) || '';
+    - const replyText = (ai && (ai.output_text || '').trim()) || '';
+    + let replyText = '';
+    + if (ai?.output && ai.output.length > 0) {
+    +   const first = ai.output[0];
+    +   if (first.content && first.content.length > 0) {
+    +     const textItem = first.content.find(c => c.type === 'output_text') || first.content[0];
+    +     if (textItem && textItem.text) {
+    +       replyText = textItem.text.trim();
+    +     }
+    +   }
+    + }
 
     if (!replyText) {
       return res.status(200).json({
