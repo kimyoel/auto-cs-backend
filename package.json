@@ -1,0 +1,19 @@
+{
+  "name": "auto-cs-backend",
+  "version": "0.1.0",
+  "description": "Backend for Auto CS Manager Chrome Extension - Generates CS replies with free/pro quota logic",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "node -r dotenv/config src/index.js",
+    "start": "NODE_ENV=production node -r dotenv/config src/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "openai": "^4.55.0"
+  }
+}
