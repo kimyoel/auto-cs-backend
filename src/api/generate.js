@@ -1,29 +1,10 @@
-/**
- * /api/generate route
- * - Keeps license/daily-limit logic, response JSON shape, and in-memory counter as-is conceptually
- * - Improves LLM prompt (system+user) and consumes `scenario` from request
- *
- * Quick scenario prompt tests (summary)
- * 1) scenario="general", tone="friendly"
- *    clipboardText 예: "배송일이 언제쯤 될까요?"
- *    기대: 첫 문장 감사 표현 → 다음 문장(들)에서 배송일 간단 안내 → 마지막에 추가 문의/감사
- *
- * 2) scenario="claim", tone="principle"
- *    clipboardText 예: "받자마자 파손됐습니다. 환불해주세요."
- *    기대: 1) 첫 문장 사과/공감 → 2) 교환/환불 절차 등 구체 해결 안내(사진 요청, 진행 절차 등) →
- *          3) 마지막에 추가 문의 안내 + 감사
- *
- * 3) scenario="review", tone="friendly"
- *    clipboardText 예(긍정): "배송도 빠르고 품질도 좋아요!"
- *    기대(긍정): 1) 감사 → 2) 만족 기쁨 공유 → 3) 재구매/브랜드 언급 권유
- *    clipboardText 예(부정): "불량이 와서 실망했어요."
- *    기대(부정): 1) 사과/공감 → 2) 개선 의지/해결 안내 → 3) 감사+추가 문의 안내
- */
+// /src/api/generate.js
 
 import express from 'express';
+import OpenAI from 'openai';
+
 const router = express.Router();
 
-import OpenAI from 'openai';
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -35,23 +16,24 @@ function todayStr() {
   return new Date().toISOString().split('T')[0];
 }
 
-// Shared handler (mounted in multiple ways for compatibility)
+// ---- 메인 핸들러 ----
 async function generateHandler(req, res) {
   try {
     const { licenseKey, tone, clipboardText, clientId, scenario } = req.body || {};
+
     const toneValue = tone || 'friendly';
     const scenarioValue = scenario || 'general';
     const text = (clipboardText || '').toString().trim();
 
-    // Policy: free vs pro
+    // ===== 1. 라이선스 / 일일 사용량 체크 =====
     const isPro = licenseKey === 'GOOD_SELLER_2025';
     const limit = isPro ? 999 : 5;
     const key = `usage:${clientId || 'anon'}:${todayStr()}`;
     const used = usageCounter.get(key) || 0;
 
-    // Free user over limit: return early without LLM call
-    if (!isPro && used >= 5) {
-      return res.json({
+    if (!isPro && used >= limit) {
+      // 무료 유저: 하루 5회 초과 시 LLM 호출 없이 바로 차단
+      return res.status(200).json({
         ok: false,
         reply: '',
         todayUsage: used,
@@ -61,10 +43,10 @@ async function generateHandler(req, res) {
       });
     }
 
-    // Increase usage prior to call (frontend mirrors this count)
+    // LLM 호출 전에 카운트 증가 (프론트와 카운트 맞추기용)
     usageCounter.set(key, used + 1);
 
-    // System prompt with scenario + tone rules (Korean) + small seller persona and style guidance
+    // ===== 2. System 프롬프트 (페르소나 + tone + scenario 규칙) =====
     const systemPrompt = `
 너는 10년 차 쿠팡/스마트스토어 판매자로, 고객 문의에 답변하는 CS 담당자이다.
 항상 한국어로만 답변한다. 말투는 정중하고 명확하게 유지한다.
@@ -74,9 +56,11 @@ async function generateHandler(req, res) {
 "AI", "자동 응답" 같은 표현은 절대 쓰지 않는다.
 
 [소규모 셀러 페르소나/스타일 가이드]
-- 너는 "작은 온라인 쇼핑몰의 판매자/CS 담당자"다. 회사 공지문이나 약관 안내문처럼 딱딱하지 않게,
-  실제 소규모 셀러가 쓰는 자연스러운 존댓말을 사용한다.
-- 예시 어투: "저희 쪽에서 바로 확인해서 처리 도와드리겠습니다.", "조금 번거로우시겠지만 ~ 부탁드리겠습니다."
+- 너는 "작은 온라인 쇼핑몰의 판매자/CS 담당자"다.
+- 회사 공지문/약관체처럼 딱딱하지 않게, 실제 소규모 셀러가 쓰는 자연스러운 존댓말을 사용한다.
+- 예시 어투:
+  · "저희 쪽에서 바로 확인해서 처리 도와드리겠습니다."
+  · "조금 번거로우시겠지만 ~ 부탁드리겠습니다."
 - 반말/반쯤 반말, 이모티콘(ㅎㅎ, ^^, ㅠㅠ 등)은 사용하지 않는다.
 
 [AI 티 줄이기]
@@ -91,41 +75,47 @@ async function generateHandler(req, res) {
 - 예: "문의 주셔서 감사합니다.", "질문 남겨 주셔서 감사합니다.", "문의 남겨 주셔서 감사드립니다." 등
 
 [tone 적용 규칙]
-- tone === "friendly": 표현을 조금 더 부드럽게, 말끝을 완곡하게 사용한다.
-- tone === "business": 최대한 중립적이고 깔끔한 문장을 사용한다.
-- tone === "principle": 판매자의 정책과 기준을 분명하게 설명하되, 상대방이 기분 나쁘지 않도록 조심스럽게 표현한다.
+- tone === "friendly":
+  · 표현을 조금 더 부드럽게, 말끝을 완곡하게 사용한다.
+- tone === "business":
+  · 최대한 중립적이고 깔끔한 문장을 사용한다.
+- tone === "principle":
+  · 판매자의 정책과 기준을 분명하게 설명하되,
+    상대방이 기분 나쁘지 않도록 조심스럽게 표현한다.
 
-[scenario 적용 규칙: scenarioValue ∈ {general|claim|review}]
+[scenario 적용 규칙: scenarioValue ∈ {general | claim | review}]
 - scenarioValue === "general":
   · 배송일, 재고, 상품 정보 등 일반 문의라고 가정한다.
   · 답변 구조:
-    1) 첫 문장에 가벼운 감사 또는 응대 표현(예: "문의 주셔서 감사합니다.")
+    1) 첫 문장에 가벼운 감사 또는 응대 표현
     2) 다음 1~2문장에서 핵심 답변을 간단하고 명확하게 설명
     3) 마지막 문장에서 추가 문의 가능성과 간단한 감사 인사를 덧붙임
-- scenarioValue === "claim":
+
 - scenarioValue === "claim":
   · 파손, 불량, 환불, 교환, 반품, 취소, 지연, 불편, 불만 등 클레임/불만 상황이라고 가정한다.
   · 답변 구조(반드시 이 순서):
     1) 첫 문장: 고객의 불편을 인정하고 사과/공감 표현
-    2) 다음 1~2문장: 판매자가 해줄 수 있는 구체 해결 방법 또는 진행 절차 안내(교환/환불 절차, 사진 요청, 고객센터 안내 등)
+    2) 다음 1~2문장: 판매자가 해줄 수 있는 구체 해결 방법 또는 진행 절차 안내
     3) 마지막 문장: 추가 문의 시 안내 + 감사 인사
   · 문제의 원인을 고객의 사용 실수로 돌리는 표현은 피하고, 판매자/제품 측의 확인과 개선 의지를 중심으로 설명한다.
+
 - scenarioValue === "review":
-  · 리뷰/후기에 다는 답글이라고 가정한다. clipboardText 내용을 바탕으로 긍/부정 판단하되 전반적 구조는 다음과 같다.
-  · 긍정 리뷰로 보이는 경우:
-    1) 첫 문장에서 진심 어린 감사 인사
-    2) 다음 문장에서 제품/서비스 만족을 함께 기뻐하는 표현
-    3) 마지막 문장에서 재구매/재방문 유도 또는 브랜드/상호명 언급으로 마무리
-  · 부정 리뷰/아쉬운 평가로 보이는 경우:
-    1) 첫 문장에서 사과/공감 표현
-    2) 다음 문장에서 개선 의지 또는 해결 방법 간단 안내
-    3) 마지막 문장에서 감사 인사 및 추가 문의 안내
+  · 리뷰/후기에 다는 답글이라고 가정한다.
+  · clipboardText 내용을 바탕으로 긍정/부정 분위기를 판단한다.
+  · 긍정 리뷰:
+    1) 첫 문장: 진심 어린 감사 인사
+    2) 다음 문장: 제품/서비스 만족을 함께 기뻐하는 표현
+    3) 마지막 문장: 재구매/재방문 유도 또는 상호명 언급으로 마무리
+  · 부정/아쉬운 리뷰:
+    1) 첫 문장: 사과/공감 표현
+    2) 다음 문장: 개선 의지 또는 해결 방법 간단 안내
+    3) 마지막 문장: 감사 인사 및 추가 문의 안내
   · 특히 부정 리뷰에서는 "조금만 더 부드럽게 사용해 주시면 됩니다"처럼
     고객이 잘못 사용해서 문제된 것처럼 들리는 표현은 사용하지 말고,
     제품 점검, 교환/환불 가능성, 품질/배송 관리 개선 의지 등을 중심으로 답변한다.
 `.trim();
 
-    // User prompt: explicitly passes tone/scenario and the customer text
+    // ===== 3. User 프롬프트 =====
     const userPrompt = `
 [tone]: ${toneValue}
 [scenario]: ${scenarioValue}
@@ -135,25 +125,39 @@ ${text}
 
 위 [scenario]에 맞는 상황이라고 가정하고, 위의 규칙을 지키면서 하나의 답변만 작성해 줘.
 문단은 1~3문단 이내로 자연스럽게 나눠 써 줘.
-응답에는 한국어 답변 텍스트만 작성해 줘(메타 정보, 리스트, 헤더 등 금지).
+응답에는 한국어 답변 텍스트만 작성해 줘 (메타 정보, 리스트, 헤더 등 금지).
 `.trim();
 
-    // Call OpenAI Responses API (단순 문자열 input 방식)
-    const combinedPrompt = `
-[시스템 규칙]
-${systemPrompt}
-
-[고객 상황]
-${userPrompt}
-`.trim();
-
+    // ===== 4. OpenAI Responses API 호출 (gpt-5-mini) =====
     const ai = await openai.responses.create({
       model: 'gpt-5-mini',
-      // 문자열 하나만 넘기면 SDK가 자동으로 input_text 블록으로 변환해 줌
-      input: combinedPrompt,
+      input: [
+        {
+          role: 'system',
+          content: [{ type: 'input_text', text: systemPrompt }],
+        },
+        {
+          role: 'user',
+          content: [{ type: 'input_text', text: userPrompt }],
+        },
+      ],
     });
 
-    const replyText = (ai?.output_text || '').trim();
+    // ===== 5. output 파싱 (output_text 수집) =====
+    let replyText = '';
+
+    if (ai && Array.isArray(ai.output)) {
+      for (const item of ai.output) {
+        if (!item?.content) continue;
+        for (const c of item.content) {
+          if (c.type === 'output_text' && typeof c.text === 'string') {
+            replyText += c.text;
+          }
+        }
+      }
+    }
+
+    replyText = replyText.trim();
 
     if (!replyText) {
       return res.status(200).json({
@@ -166,18 +170,19 @@ ${userPrompt}
       });
     }
 
+    // ===== 6. 정상 응답 =====
     return res.status(200).json({
       ok: true,
       reply: replyText,
       todayUsage: usageCounter.get(key) || used + 1,
       todayLimit: limit,
       isPro,
-      message: isPro
-        ? '생성 완료(프로)'
-        : '생성 완료',
+      message: isPro ? '생성 완료(프로)' : '생성 완료',
     });
   } catch (err) {
     console.error('Error in /api/generate:', err);
+
+    // 에러가 나도 프론트는 항상 같은 형태의 JSON을 받도록 통일
     return res.status(200).json({
       ok: false,
       reply: '',
@@ -189,12 +194,8 @@ ${userPrompt}
   }
 }
 
-// Support both mounting styles:
-// 1) app.use('/api', router) with router.post('/generate', ...)
-// 2) app.use('/api/generate', router) with router.post('/', ...)
-// 3) app.post('/api/generate', router) — router is callable middleware with '/' route
+// router 설정 (기존 구조 유지)
 router.post('/generate', generateHandler);
 router.post('/', generateHandler);
 
-// Export router for use in index.js as generateRouter
 export default router;
