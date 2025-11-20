@@ -132,28 +132,22 @@ ${text}
 응답에는 한국어 답변 텍스트만 작성해 줘(메타 정보, 리스트, 헤더 등 금지).
 `.trim();
 
-    // Call OpenAI Responses API
+    // Call OpenAI Responses API (단순 문자열 input 방식)
+    const combinedPrompt = `
+[시스템 규칙]
+${systemPrompt}
+
+[고객 상황]
+${userPrompt}
+`.trim();
+
     const ai = await openai.responses.create({
       model: 'gpt-4.1-mini',
-      input: [
-    -   { role: 'system', content: [{ type: 'text', text: systemPrompt }] },
-    -   { role: 'user', content: [{ type: 'text', text: userPrompt }] },
-    +   { role: 'system', content: [{ type: 'input_text', text: systemPrompt }] },
-    +   { role: 'user', content: [{ type: 'input_text', text: userPrompt }] },
-      ],
+      // 문자열 하나만 넘기면 SDK가 자동으로 input_text 블록으로 변환해 줌
+      input: combinedPrompt,
     });
 
-    - const replyText = (ai && (ai.output_text || '').trim()) || '';
-    + let replyText = '';
-    + if (ai?.output && ai.output.length > 0) {
-    +   const first = ai.output[0];
-    +   if (first.content && first.content.length > 0) {
-    +     const textItem = first.content.find(c => c.type === 'output_text') || first.content[0];
-    +     if (textItem && textItem.text) {
-    +       replyText = textItem.text.trim();
-    +     }
-    +   }
-    + }
+    const replyText = (ai?.output_text || '').trim();
 
     if (!replyText) {
       return res.status(200).json({
